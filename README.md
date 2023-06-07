@@ -4,4 +4,4 @@
 
 1. npm install
 2. cp example.env .env (Fill in the envs)
-3. node index.js
+3. node index.js --source=github  // or --source=slack

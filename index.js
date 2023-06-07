@@ -4,8 +4,15 @@ const axios = require("axios");
 const moment = require("moment");
 const { postToDiscord, postToSlack } = require("./channels");
 const { requestChat, models } = require("./chat");
+const { requestLastWeekMessages } = require("./slack_client");
 
 const repository = "mobile-dev-inc/maestro";
+const token = process.env.SLACK_API_TOKEN;
+
+const providerType = {
+  0: "GitHub issues",
+  1: "Slack #maestro channel messages",
+};
 
 const getIssues = async (repoName) => {
   const oneWeekAgo = moment().subtract(7, "days").toISOString();
@@ -56,7 +63,19 @@ Issues: ${issuesPrompt}`;
   return response;
 };
 
-const getInsights = async (issues) => {
+const getSlackMessagesInsights = async (messages) => {
+  const messagesPrompt = JSON.stringify(messages);
+  const prompt = `I will provide you with a list of Slack messages from a customer support channel for a mobile ui automation framework called Maestro.
+Provide me with the top 3 most interesting trends.
+Make sure to add an emoji at the beginning of each trend.
+---
+Messages: ${messagesPrompt}`;
+  const response = await requestChat(prompt, models["3"], 2500);
+
+  return response;
+};
+
+const getGithubIssuesInsights = async (issues) => {
   const issuesPrompt = JSON.stringify(issues);
   const prompt = `I will provide you with github issues (bugs only) for a mobile ui automation repository called Maestro.
 Provide me with the top 3 most interesting trends.
@@ -69,13 +88,25 @@ Issues: ${issuesPrompt}`;
 };
 
 // Generates Discord/Slack message from issue summaries
-const generateMessages = async (summaries) => {
-  console.log(`Generating insights from ${summaries.length} issues `);
+const generateMessages = async (summaries, type) => {
+  console.log(`Generating insights from ${summaries.length} ${type} `);
 
   // get insights
-  const insights = await getInsights(summaries);
-  console.log("Insights: ", insights || "No response from GPT-4");
-  await postToDiscord("Maestro Trends (Last 7 days)", insights);
+  let insights;
+
+  switch (type) {
+    case providerType[0]:
+      insights = await getGithubIssuesInsights(summaries);
+      break;
+    case providerType[1]:
+      insights = await getSlackMessagesInsights(summaries);
+      break;
+    default:
+      insights = null;
+  }
+
+  console.log("Insights: \n", insights || "No response from GPT-4");
+  //await postToDiscord("Maestro Trends (Last 7 days)", insights);
 
   // get top issues
   // const topIssues = await getTopIssues(summaries);
@@ -83,23 +114,52 @@ const generateMessages = async (summaries) => {
   // await postToDiscord("Maestro Top Issues (Last 7 days)", topIssues);
 };
 
-// get issues for the repo
-getIssues(repository)
-  .then((issues) => {
-    // remove pull requests
-    return issues.filter((issue) => !issue.pull_request);
-  })
+const githubIssuesFlow = async () => {
+  // get issues for the repo
+  getIssues(repository)
+    .then((issues) => {
+      // remove pull requests
+      return issues.filter((issue) => !issue.pull_request);
+    })
 
-  // get summaries for the github issues
-  .then((issues) => {
-    return getSummaries(issues.slice(0, 20));
-  })
+    // get summaries for the github issues
+    .then((issues) => {
+      return getSummaries(issues.slice(0, 20));
+    })
+    // get insights from summaries and post to Discord
+    .then((summaries) => {
+      console.log("Summaries: ", summaries);
+      return generateMessages(summaries, providerType[0]);
+    })
+    .catch((error) => {
+      console.log(error);
+    });
+}
 
-  // get insights from summaries and post to Discord
-  .then((summaries) => {
-    console.log("Summaries: ", summaries);
-    return generateMessages(summaries);
-  })
-  .catch((error) => {
-    console.log(error);
-  });
+const slackMessagesFlow = async () => {
+  requestLastWeekMessages(token)
+    .then((messages) => {
+      // remove non-user messages
+      return messages.filter(message => message.client_msg_id).map(message => message.text);
+    })
+    .then((messages) => {
+      console.log("Messages: ", messages);
+      return generateMessages(messages, providerType[1]);
+    });
+}
+
+const args = process.argv.slice(2);
+
+args.forEach((arg) => {
+  if (arg.startsWith('--source=')) {
+    const param = arg.split('=')[1];
+
+    if (param === 'slack') {
+      slackMessagesFlow();
+    } else if (param === 'github') {
+      githubIssuesFlow();
+    } else {
+      console.log(`Invalid source: ${param}`);
+    }
+  }
+});
